@@ -1,58 +1,40 @@
 <?php
-require_once 'limonade/lib/limonade.php';
+session_start();
 
-function configure() {
-  option('base_uri', '/');
-  option('session', 'isu4_qualifier_session');
+$host = getenv('ISU4_DB_HOST') ?: 'localhost';
+$port = getenv('ISU4_DB_PORT') ?: 3306;
+$dbname = getenv('ISU4_DB_NAME') ?: 'isu4_qualifier';
+$username = getenv('ISU4_DB_USER') ?: 'root';
+$password = getenv('ISU4_DB_PASSWORD');
+$db = null;
 
-  $host = getenv('ISU4_DB_HOST') ?: 'localhost';
-  $port = getenv('ISU4_DB_PORT') ?: 3306;
-  $dbname = getenv('ISU4_DB_NAME') ?: 'isu4_qualifier';
-  $username = getenv('ISU4_DB_USER') ?: 'root';
-  $password = getenv('ISU4_DB_PASSWORD');
-  $db = null;
-  try {
-    $db = new PDO(
-      'mysql:host=' . $host . ';port=' . $port. ';dbname=' . $dbname,
-      $username,
-      $password,
-      [ PDO::ATTR_PERSISTENT => true,
-        PDO::MYSQL_ATTR_INIT_COMMAND => 'SET CHARACTER SET `utf8`',
-      ]
-    );
-  } catch (PDOException $e) {
-    halt("Connection faild: $e");
-  }
-  $db->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
-
-  option('db_conn', $db);
-
-  $config = [
-    'user_lock_threshold' => getenv('ISU4_USER_LOCK_THRESHOLD') ?: 3,
-    'ip_ban_threshold' => getenv('ISU4_IP_BAN_THRESHOLD') ?: 10
-  ];
-  option('config', $config);
+try {
+  $db = new PDO(
+    'mysql:host=' . $host . ';port=' . $port. ';dbname=' . $dbname,
+    $username,
+    $password,
+    [
+      PDO::ATTR_PERSISTENT => true,
+      PDO::MYSQL_ATTR_INIT_COMMAND => 'SET CHARACTER SET `utf8`',
+    ]
+  );
+} catch (PDOException $e) {
+  
 }
 
-function uri_for($path) {
-  $host = $_SERVER['HTTP_X_FORWARDED_HOST'] ?: $_SERVER['HTTP_HOST'];
-  return 'http://' . $host . $path;
-}
+$db->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
 
-function get($key) {
-  return set($key);
-}
-
-function before() {
-  layout('base.html.php');
-}
+$config = [
+  'user_lock_threshold' => getenv('ISU4_USER_LOCK_THRESHOLD') ?: 3,
+  'ip_ban_threshold' => getenv('ISU4_IP_BAN_THRESHOLD') ?: 10
+];
 
 function calculate_password_hash($password, $salt) {
   return hash('sha256', $password . ':' . $salt);
 }
 
 function login_log($succeeded, $login, $user_id=null) {
-  $db = option('db_conn');
+  global $db;
 
   $stmt = $db->prepare('INSERT INTO login_log (`created_at`, `user_id`, `login`, `ip`, `succeeded`) VALUES (NOW(),:user_id,:login,:ip,:succeeded)');
   $stmt->bindValue(':user_id', $user_id);
@@ -65,30 +47,29 @@ function login_log($succeeded, $login, $user_id=null) {
 function user_locked($user) {
   if (empty($user)) { return null; }
 
-  $db = option('db_conn');
+  global $db, $config;
+
   $stmt = $db->prepare('SELECT COUNT(1) AS failures FROM login_log WHERE user_id = :user_id AND id > IFNULL((select id from login_log where user_id = :user_id AND succeeded = 1 ORDER BY id DESC LIMIT 1), 0)');
   $stmt->bindValue(':user_id', $user['id']);
   $stmt->execute();
   $log = $stmt->fetch(PDO::FETCH_ASSOC);
 
-  $config = option('config');
   return $config['user_lock_threshold'] <= $log['failures'];
 }
 
-# FIXME
 function ip_banned() {
-  $db = option('db_conn');
+  global $db, $config;
+
   $stmt = $db->prepare('SELECT COUNT(1) AS failures FROM login_log WHERE ip = :ip AND id > IFNULL((select id from login_log where ip = :ip AND succeeded = 1 ORDER BY id DESC LIMIT 1), 0)');
   $stmt->bindValue(':ip', $_SERVER['REMOTE_ADDR']);
   $stmt->execute();
   $log = $stmt->fetch(PDO::FETCH_ASSOC);
 
-  $config = option('config');
   return $config['ip_ban_threshold'] <= $log['failures'];
 }
 
 function attempt_login($login, $password) {
-  $db = option('db_conn');
+  global $db;
 
   $stmt = $db->prepare('SELECT * FROM users WHERE login = :login');
   $stmt->bindValue(':login', $login);
@@ -124,7 +105,7 @@ function current_user() {
     return null;
   }
 
-  $db = option('db_conn');
+  global $db;
 
   $stmt = $db->prepare('SELECT * FROM users WHERE id = :id');
   $stmt->bindValue(':id', $_SESSION['user_id']);
@@ -141,11 +122,12 @@ function current_user() {
 
 function last_login() {
   $user = current_user();
+
   if (empty($user)) {
     return null;
   }
 
-  $db = option('db_conn');
+  global $db;
 
   $stmt = $db->prepare('SELECT * FROM login_log WHERE succeeded = 1 AND user_id = :id ORDER BY id DESC LIMIT 2');
   $stmt->bindValue(':id', $user['id']);
@@ -155,10 +137,12 @@ function last_login() {
 }
 
 function banned_ips() {
-  $threshold = option('config')['ip_ban_threshold'];
+  global $config;
+
+  $threshold = $config['ip_ban_threshold'];
   $ips = [];
 
-  $db = option('db_conn');
+  global $db;
 
   $stmt = $db->prepare('SELECT ip FROM (SELECT ip, MAX(succeeded) as max_succeeded, COUNT(1) as cnt FROM login_log GROUP BY ip) AS t0 WHERE t0.max_succeeded = 0 AND t0.cnt >= :threshold');
   $stmt->bindValue(':threshold', $threshold);
@@ -185,10 +169,12 @@ function banned_ips() {
 }
 
 function locked_users() {
-  $threshold = option('config')['user_lock_threshold'];
+  global $config;
+
+  $threshold = $config['user_lock_threshold'];
   $user_ids = [];
 
-  $db = option('db_conn');
+  global $db;
 
   $stmt = $db->prepare('SELECT login FROM (SELECT user_id, login, MAX(succeeded) as max_succeeded, COUNT(1) as cnt FROM login_log GROUP BY user_id) AS t0 WHERE t0.user_id IS NOT NULL AND t0.max_succeeded = 0 AND t0.cnt >= :threshold');
   $stmt->bindValue(':threshold', $threshold);
@@ -214,52 +200,78 @@ function locked_users() {
   return $user_ids;
 }
 
-dispatch_get('/', function() {
-  return html('index.html.php');
-});
+function is($path) {
+  return array_key_exists($path, $_REQUEST);
+}
 
-dispatch_post('/login', function() {
-  $result = attempt_login($_POST['login'], $_POST['password']);
-  if (!empty($result['user'])) {
-    session_regenerate_id(true);
-    $_SESSION['user_id'] = $result['user']['id'];
-    return redirect_to('/mypage');
+function render($template, $values) {
+  extract($values);
+
+  include('views/' . $template);
+}
+
+function redirect($url) {
+  header('Location: ' . $url);
+}
+
+if (is('/')) {
+  if (isset($_SESSION['notice'])) {
+    $notice = $_SESSION['notice'];
+    unset($_SESSION['notice']);
   }
   else {
-    switch($result['error']) {
-      case 'locked':
-        flash('notice', 'This account is locked.');
-        break;
-      case 'banned':
-        flash('notice', "You're banned.");
-        break;
-      default:
-        flash('notice', 'Wrong username or password');
-        break;
-    }
-    return redirect_to('/');
+    $notice = null;
   }
-});
 
-dispatch_get('/mypage', function() {
+  return render('index.html.php', [
+    'notice' => $notice
+  ]);
+}
+elseif (is('/mypage')) {
   $user = current_user();
 
   if (empty($user)) {
-    flash('notice', 'You must be logged in');
-    return redirect_to('/');
+    $_SESSION['notice'] = 'You must be logged in';
+
+    return redirect('/');
   }
   else {
-    set('user', $user);
-    set('last_login', last_login());
-    return html('mypage.html.php');
+    return render('mypage.html.php', [
+      'user' => $user,
+      'last_login' => last_login()
+    ]);
   }
-});
+}
+elseif (is('/login')) {
+  $result = attempt_login($_POST['login'], $_POST['password']);
 
-dispatch_get('/report', function() {
-  return json_encode([
+  if (!empty($result['user'])) {
+    session_regenerate_id(true);
+
+    $_SESSION['user_id'] = $result['user']['id'];
+
+    return redirect('/mypage');
+  }
+  else {
+    switch($result['error']) {
+    case 'locked':
+      $_SESSION['notice'] = 'This account is locked.';
+      break;
+    case 'banned':
+      $_SESSION['notice'] = "You're banned.";
+      break;
+    default:
+      $_SESSION['notice'] = 'Wrong username or password';
+      break;
+    }
+
+    return redirect('/');
+  }
+}
+elseif (is('/report')) {
+  echo json_encode([
     'banned_ips' => banned_ips(),
     'locked_users' => locked_users()
   ]);
-});
+}
 
-run();
