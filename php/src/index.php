@@ -19,7 +19,7 @@ try {
     ]
   );
 } catch (PDOException $e) {
-  
+  die();
 }
 
 $db->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
